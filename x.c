@@ -410,7 +410,6 @@ mousesel(XEvent *e, int done)
 void
 mousereport(XEvent *e)
 {
-    int code;
 	int len, x = evcol(e), y = evrow(e),
 	    button = e->xbutton.button, state = e->xbutton.state;
 	char buf[40];
@@ -459,11 +458,11 @@ mousereport(XEvent *e)
 
 	if (IS_SET(MODE_MOUSESGR)) {
 		len = snprintf(buf, sizeof(buf), "\033[<%d;%d;%d%c",
-				code, x+1, y+1,
+				button, x+1, y+1,
 				e->type == ButtonRelease ? 'm' : 'M');
 	} else if (x < 223 && y < 223) {
 		len = snprintf(buf, sizeof(buf), "\033[M%c%c%c",
-				32+code, 32+x+1, 32+y+1);
+				32+button, 32+x+1, 32+y+1);
 	} else {
 		return;
 	}
@@ -2018,8 +2017,10 @@ kpress(XEvent *ev)
 {
 	XKeyEvent *e = &ev->xkey;
 	KeySym ksym;
-	char buf[64], *customkey;
-	int len;
+	char *buf = NULL, *customkey;
+	int len = 0;
+	int buf_size = 64;
+	int critical = - 1;
 	Rune c;
 	Status status;
 	Shortcut *bp;
@@ -2027,27 +2028,44 @@ kpress(XEvent *ev)
 	if (IS_SET(MODE_KBDLOCK))
 		return;
 
-	if (xw.ime.xic)
-		len = XmbLookupString(xw.ime.xic, e, buf, sizeof buf, &ksym, &status);
-	else
-		len = XLookupString(e, buf, sizeof buf, &ksym, NULL);
+reallocbuf:
+	if (critical > 0)
+		goto cleanup;
+	if (buf)
+		free(buf);
+
+	buf = xmalloc((buf_size) * sizeof(char));
+	critical += 1;
+
+	if (xw.ime.xic) {
+		len = XmbLookupString(xw.ime.xic, e, buf, buf_size, &ksym, &status);
+		if (status == XBufferOverflow) {
+			buf_size = len;
+			goto reallocbuf;
+		}
+	} else {
+		// Not sure how to fix this and if it is fixable
+		// but at least it does write something into the buffer
+		// so it is not as critical
+		len = XLookupString(e, buf, buf_size, &ksym, NULL);
+	}
 	/* 1. shortcuts */
 	for (bp = shortcuts; bp < shortcuts + LEN(shortcuts); bp++) {
 		if (ksym == bp->keysym && match(bp->mod, e->state)) {
 			bp->func(&(bp->arg));
-			return;
+			goto cleanup;
 		}
 	}
 
 	/* 2. custom keys from config.h */
 	if ((customkey = kmap(ksym, e->state))) {
 		ttywrite(customkey, strlen(customkey), 1);
-		return;
+		goto cleanup;
 	}
 
 	/* 3. composed string from input method */
 	if (len == 0)
-		return;
+		goto cleanup;
 	if (len == 1 && e->state & Mod1Mask) {
 		if (IS_SET(MODE_8BIT)) {
 			if (*buf < 0177) {
@@ -2060,7 +2078,11 @@ kpress(XEvent *ev)
 			len = 2;
 		}
 	}
-	ttywrite(buf, len, 1);
+	if (len <= buf_size)
+		ttywrite(buf, len, 1);
+cleanup:
+	if (buf)
+		free(buf);
 }
 
 void
